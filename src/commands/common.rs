@@ -67,7 +67,9 @@ pub enum Command {
         total_counted_seats: Option<usize>,
         max_earner_seats: Option<usize>,
     },
-    PrintTeamReport,
+    PrintTeamReport {
+        team_name: Option<String>,
+    },
     PrintEpochState,
     PrintTeamVoteParticipation {
         team_name: String,

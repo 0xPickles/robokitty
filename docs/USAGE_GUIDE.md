@@ -96,6 +96,7 @@ To see all available commands, run `robokitty_cli --help`. To see options for a 
 -   **Generate Team Report:**
     ```bash
     robokitty_cli report team
+    robokitty_cli report team Dinobots
     ```
 
 -   **Generate Unpaid Requests Report:**

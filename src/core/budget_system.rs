@@ -287,11 +287,13 @@ impl BudgetSystem {
             return Err("Raffle results have not been generated");
         }
 
-        let config = raffle.config();
+        let total_eligible_seats = raffle.result()
+            .map(|result| result.counted().len() as u32)
+            .ok_or("Raffle results have not been generated")?;
 
         let vote_type = VoteType::Formal { 
             raffle_id,
-            total_eligible_seats: config.total_counted_seats() as u32,
+            total_eligible_seats,
             threshold: self.config.default_qualified_majority_threshold,
             counted_points: self.config.counted_vote_points,
             uncounted_points: self.config.uncounted_vote_points
@@ -532,9 +534,13 @@ impl BudgetSystem {
     
         let epoch_id = raffle.config().epoch_id();
     
+        let total_eligible_seats = raffle.result()
+            .map(|result| result.counted().len() as u32)
+            .ok_or("Raffle result not found")?;
+
         let vote_type = VoteType::Formal {
             raffle_id,
-            total_eligible_seats: raffle.config().total_counted_seats() as u32,
+            total_eligible_seats,
             threshold: self.config.default_qualified_majority_threshold,
             counted_points: counted_points.unwrap_or(self.config.counted_vote_points),
             uncounted_points: uncounted_points.unwrap_or(self.config.uncounted_vote_points)
@@ -629,8 +635,22 @@ impl BudgetSystem {
         }
     }
 
-    pub fn print_team_report(&self) -> String {
-        let mut teams: Vec<&Team> = self.state.current_state().teams().values().collect();
+    pub fn print_team_report(&self, team_name: Option<&str>) -> Result<String, Box<dyn Error>> {
+        let mut teams: Vec<&Team> = self.state.current_state().teams().values()
+            .filter(|team| {
+                team_name
+                    .map(|name| team.name_matches(name) || team.name().eq_ignore_ascii_case(name))
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        if teams.is_empty() {
+            return Err(match team_name {
+                Some(name) => format!("Team not found: {}", name).into(),
+                None => "No teams found".into(),
+            });
+        }
+
         teams.sort_by(|a, b| a.name().cmp(&b.name()));
 
         let mut report = String::from("Team Report:\n\n");
@@ -655,7 +675,7 @@ impl BudgetSystem {
             report.push_str("\n");
         }
 
-        report
+        Ok(report)
     }
 
     pub fn print_epoch_state(&self) -> Result<String, Box<dyn Error>> {
@@ -1134,10 +1154,12 @@ impl BudgetSystem {
         let counted_no = counted.no();
         let total_counted_votes = counted_yes + counted_no;
         
-        let total_eligible_seats = match vote.vote_type() {
-            VoteType::Formal { total_eligible_seats, .. } => total_eligible_seats,
-            _ => &0,
-        };
+        let total_eligible_seats = raffle.result()
+            .map(|result| result.counted().len() as u32)
+            .unwrap_or_else(|| match vote.vote_type() {
+                VoteType::Formal { total_eligible_seats, .. } => *total_eligible_seats,
+                _ => 0,
+            });
     
         // Calculate absent votes for counted seats only
         let absent = total_eligible_seats.saturating_sub(total_counted_votes as u32);
@@ -1301,10 +1323,10 @@ def hello_world():
         if let Some(vote) = self.state.votes().values().find(|v| v.proposal_id() == proposal_id) {
             if let Some(result) = vote.result() {
                 match result {
-                    VoteResult::Formal { counted, uncounted, passed } => {
+                    VoteResult::Formal { counted, passed, .. } => {
                         report.push_str(&format!("The proposal was {} with {} votes in favor and {} votes against. ", 
                             if *passed { "approved" } else { "not approved" }, 
-                            counted.yes(), counted.yes() + uncounted.yes()));
+                            counted.yes(), counted.no()));
                     },
                     VoteResult::Informal { count } => {
                         report.push_str(&format!("This was an informal vote with {} votes in favor and {} votes against. ", 
@@ -2678,8 +2700,8 @@ impl CommandExecutor for BudgetSystem {
             
                 Ok(output)
             },
-            Command::PrintTeamReport => {
-                Ok(self.print_team_report())
+            Command::PrintTeamReport { team_name } => {
+                self.print_team_report(team_name.as_deref())
             },
             Command::PrintEpochState => {
                 self.print_epoch_state()
@@ -3397,7 +3419,7 @@ mod tests {
         budget_system.close_vote(vote_id).unwrap();
     
         // Generate reports
-        let team_report = budget_system.print_team_report();
+        let team_report = budget_system.print_team_report(None).unwrap();
         assert!(team_report.contains("Test Team"));
     
         let epoch_state = budget_system.print_epoch_state().unwrap();
@@ -3411,9 +3433,66 @@ mod tests {
     
         // Close proposal before closing epoch
         budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
-    
+
         budget_system.close_epoch(None).unwrap();
         budget_system.generate_end_of_epoch_report(&budget_system.get_epoch(&epoch_id).unwrap().name()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_formal_votes_use_actual_counted_seats_when_fewer_teams_exist() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        create_active_epoch(&mut budget_system).await;
+
+        let team_id1 = budget_system.create_team("Alpha".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        let team_id2 = budget_system.create_team("Beta".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
+        let team_id3 = budget_system.create_team("Gamma".to_string(), "Rep 3".to_string(), Some(vec![3000]), None).unwrap();
+        let team_id4 = budget_system.create_team("Delta".to_string(), "Rep 4".to_string(), None, None).unwrap();
+
+        let proposal_id = budget_system.add_proposal("Seat Count Proposal".to_string(), None, None, None, None, None).unwrap();
+        let config = budget_system.config().clone();
+        let (raffle_id, _) = budget_system.prepare_raffle("Seat Count Proposal", None, &config).unwrap();
+        budget_system.finalize_raffle(raffle_id, 12345, 12355, "mock_randomness".to_string()).await.unwrap();
+
+        let raffle = budget_system.get_raffle(&raffle_id).unwrap();
+        assert_eq!(raffle.result().unwrap().counted().len(), 4);
+
+        let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
+        let vote = budget_system.get_vote(&vote_id).unwrap();
+        assert!(matches!(
+            vote.vote_type(),
+            VoteType::Formal { total_eligible_seats: 4, .. }
+        ));
+
+        budget_system.cast_votes(vote_id, vec![
+            (team_id1, VoteChoice::Yes),
+            (team_id2, VoteChoice::Yes),
+            (team_id3, VoteChoice::Yes),
+            (team_id4, VoteChoice::Yes),
+        ]).unwrap();
+
+        assert!(budget_system.close_vote(vote_id).unwrap());
+
+        let report = budget_system.generate_vote_report(vote_id).unwrap();
+        assert!(report.contains("**Status: Approved**"));
+        assert!(report.contains("Counted votes cast: 4/4"));
+    }
+
+    #[tokio::test]
+    async fn test_team_report_can_be_filtered_by_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        budget_system.create_team("Dinobots".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        budget_system.create_team("Vaults".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
+
+        let report = budget_system.print_team_report(Some("dinobots")).unwrap();
+        assert!(report.contains("Dinobots"));
+        assert!(!report.contains("Vaults"));
+        assert!(budget_system.print_team_report(Some("missing")).is_err());
     }
 
     #[tokio::test]
@@ -3482,7 +3561,7 @@ mod tests {
         budget_system.close_epoch(None).unwrap();
 
         // Generate other report
-        let team_report = budget_system.print_team_report();
+        let team_report = budget_system.print_team_report(None).unwrap();
         let proposal_report = budget_system.generate_proposal_report(proposal_id).unwrap();
         let point_report = budget_system.generate_point_report(Some("Test Epoch")).unwrap();
         budget_system.generate_end_of_epoch_report(&budget_system.get_epoch(&epoch_id).unwrap().name()).unwrap();

@@ -306,8 +306,11 @@ pub enum RaffleCommands {
 
 #[derive(Subcommand)]
 pub enum ReportCommands {
-   /// Print team report
-   Team,
+   /// Print team report, optionally for a specific team
+   Team {
+       #[arg(value_name = "TEAM")]
+       team_name: Option<String>,
+   },
 
    /// Print epoch state report
    EpochState,
@@ -601,8 +604,8 @@ impl Cli {
             },
 
             Commands::Report { command } => match command {
-                ReportCommands::Team => {
-                    Ok(Command::PrintTeamReport)
+                ReportCommands::Team { team_name } => {
+                    Ok(Command::PrintTeamReport { team_name })
                 },
                 ReportCommands::EpochState => {
                     Ok(Command::PrintEpochState)
@@ -1513,7 +1516,19 @@ mod tests {
     fn test_report_team_command() {
         let args = args(&["report", "team"]);
         let cmd = parse_cli_args(&args).unwrap();
-        assert!(matches!(cmd, Command::PrintTeamReport));
+        assert!(matches!(cmd, Command::PrintTeamReport { team_name: None }));
+    }
+
+    #[test]
+    fn test_report_team_command_with_team_name() {
+        let args = args(&["report", "team", "Dinobots"]);
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::PrintTeamReport { team_name } => {
+                assert_eq!(team_name, Some("Dinobots".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
     }
 
     #[test]

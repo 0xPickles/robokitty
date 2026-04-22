@@ -567,7 +567,7 @@ pub async fn execute_command(
         },
 
         TelegramCommand::PrintTeamReport => {
-            budget_system.execute_command(Command::PrintTeamReport).await
+            budget_system.execute_command(Command::PrintTeamReport { team_name: None }).await
             .map(|s| escape_markdown(&s))
             .map_err(|e| format!("Command failed: {}", e))
         },
@@ -1778,4 +1778,3 @@ mod tests {
     }
 
 }
-
